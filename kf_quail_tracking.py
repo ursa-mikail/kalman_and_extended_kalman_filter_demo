@@ -192,3 +192,34 @@ plt.close()
 print("Done. Plots written to:", OUTDIR)
 print(f"Final position error: {abs(Q_loc_true[-1] - Q_loc_est[-1]):.3f} m "
       f"(raw measurement error would have been {abs(Q_loc_true[-1] - Q_loc_meas[-1]):.3f} m)")
+
+# (e) THE HEADLINE PLOT: watch the estimate converge onto the truth, with an
+# honest shrinking uncertainty band (±2 standard deviations) around it.
+plt.figure(figsize=(9, 5))
+sigma = np.sqrt(P_mag_est)
+plt.fill_between(t_grid, Q_loc_est - 2*sigma, Q_loc_est + 2*sigma,
+                  color='green', alpha=0.15, label='KF ±2σ confidence band')
+plt.plot(t_grid, Q_loc_meas, '.', color='gray', markersize=4, alpha=0.5, label='Raw noisy measurement')
+plt.plot(t_grid, Q_loc_true, 'r-', linewidth=2.5, label='True position')
+plt.plot(t_grid, Q_loc_est, 'g-', linewidth=2, label='KF estimate')
+plt.xlabel('time (s)')
+plt.ylabel('position (m)')
+plt.title('The KF estimate locks onto the truth while its own\nuncertainty band (shaded) honestly shrinks')
+plt.legend(loc='upper left')
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.savefig(os.path.join(OUTDIR, 'kf_convergence.png'), dpi=150)
+plt.close()
+
+# (f) error-over-time: raw measurement error vs KF error, side by side
+plt.figure(figsize=(9, 5))
+plt.plot(t_grid, np.abs(Q_loc_meas - Q_loc_true), '-', color='gray', alpha=0.6, label='Raw measurement error')
+plt.plot(t_grid, np.abs(Q_loc_est - Q_loc_true), 'g-', linewidth=2, label='KF estimate error')
+plt.xlabel('time (s)')
+plt.ylabel('|error| (m)')
+plt.title('KF error stays low and stable; raw measurement error stays noisy')
+plt.legend()
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.savefig(os.path.join(OUTDIR, 'kf_error.png'), dpi=150)
+plt.close()

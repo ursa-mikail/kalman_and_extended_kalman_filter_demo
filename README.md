@@ -1,780 +1,565 @@
 # Kalman Filter & Extended Kalman Filter — A Ninja-Tracks-a-Quail Tutorial
 
-This tutorial builds up the Kalman Filter (KF) and Extended Kalman Filter (EKF)
-from scratch, using one running story so nothing feels like it appears out of
-nowhere:
+**The story:** a Ninja is tracking a flying Quail. His eyes are noisy, but
+he knows roughly how quails fly (physics). The Kalman Filter is the
+mathematically optimal way to combine "what physics predicts" with "what
+his eyes report" into one best guess — plus an honest measure of how
+confident that guess is.
 
-> A Ninja is trying to track a flying Quail. He can't see it perfectly — his
-> eyes are noisy — but he *does* know roughly how quails fly (physics). The
-> Kalman Filter is the mathematically optimal way for him to combine
-> "what physics predicts" with "what his eyes report" into a single best
-> guess, together with an honest measure of how confident that guess is.
+We build this up in two parts:
 
-Four code files go with this README:
+- **Part 1 — the Kalman Filter (KF).** The Ninja can see the Quail's
+  position directly (just noisily). Everything is linear.
+- **Part 2 — the Extended Kalman Filter (EKF).** The Ninja swaps his eyes
+  for a rangefinder + compass, so he only measures *distance* and
+  *bearing angle* — both nonlinear functions of position. This is the
+  standard motivation for why the EKF exists at all.
 
-| File | What it simulates | Filter used | Randomness? |
-|---|---|---|---|
-| `kf_quail_tracking.py` | 1‑D quail flight, Ninja measures **position directly** (noisy) | linear **KF** | yes (real sensor noise, for realistic plots) |
-| `kf_stepbystep.py` | The exact same KF math, 3 timesteps | linear **KF** | **no** — fixed, hand-chosen inputs |
-| `ekf_radar_tracking.py` | 2‑D quail flight, Ninja measures **range & bearing** (nonlinear) | **EKF** | yes (real sensor noise, for realistic plots) |
-| `ekf_stepbystep.py` | The exact same EKF math, 2 timesteps | **EKF** | **no** — fixed, hand-chosen inputs |
+## Files
 
-Run any of them with `python3 <file>.py`. The two `_tracking.py` scripts save
-plots into `./plots/`; the two `_stepbystep.py` scripts just print every
-intermediate matrix to your terminal, deliberately with **no randomness**,
-so that the numbers in this README are not approximations — they are the
-literal, copy-pasted console output of those scripts. Run them yourself and
-you should see the exact same numbers printed below, in Sections 4 and 8.
+| File | What it does | Randomness? |
+|---|---|---|
+| `kf_quail_tracking.py` | Runs the full 1‑D KF simulation, saves plots | yes |
+| `kf_stepbystep.py` | Prints the KF's matrices, 3 fixed steps, no plots | **no** |
+| `ekf_radar_tracking.py` | Runs the full 2‑D EKF simulation, saves plots | yes |
+| `ekf_stepbystep.py` | Prints the EKF's matrices, 2 fixed steps, no plots | **no** |
 
-> **A note on why there are two versions of each filter:** the `_tracking.py`
-> scripts are the "real" simulations (nice for plots, but their random noise
-> means you can never exactly reproduce a number by hand). The
-> `_stepbystep.py` scripts strip the randomness out and print every matrix,
-> so you always have something deterministic to check your own by-hand
-> arithmetic against. If a number in this README doesn't match what you get
-> by hand, run the matching `_stepbystep.py` script — it is the ground
-> truth.
+Run any of them with `python3 <file>.py`. If a number in this README ever
+looks surprising, run the matching `_stepbystep.py` script — its printed
+output is the ground truth this README is built from, not a hand
+approximation.
 
 ---
 
-## Table of contents
+# Part 1 — The Kalman Filter
 
-1. [The problem the Kalman Filter solves](#1-the-problem-the-kalman-filter-solves)
-2. [Setting up the quail-tracking model](#2-setting-up-the-quail-tracking-model)
-3. [Deriving the Kalman Filter equations](#3-deriving-the-kalman-filter-equations)
-4. [Worked numeric example, by hand, one full step](#4-worked-numeric-example-by-hand-one-full-step)
-5. [Reading the KF code, line by line](#5-reading-the-kf-code-line-by-line)
-6. [From KF to EKF: why linear isn't always enough](#6-from-kf-to-ekf-why-linear-isnt-always-enough)
-7. [Deriving the Extended Kalman Filter equations](#7-deriving-the-extended-kalman-filter-equations)
-8. [Worked numeric example for the EKF](#8-worked-numeric-example-for-the-ekf)
-9. [Reading the EKF code, line by line](#9-reading-the-ekf-code-line-by-line)
-10. [KF vs EKF: when to use which](#10-kf-vs-ekf-when-to-use-which)
-11. [Common pitfalls & things people get wrong](#11-common-pitfalls--things-people-get-wrong)
+## 1.1 Picking the state, then deriving everything else from it
 
----
+### Step 0 — what goes in the state vector, and why
 
-## 1. The problem the Kalman Filter solves
+A "state" is the smallest set of numbers that lets you predict what
+happens next, given the inputs. For a Quail flying under a commanded
+acceleration, Newtonian kinematics says the *next* position depends on
+the *current* position **and** the *current* velocity — position alone
+isn't enough to predict motion (you also need to know which way and how
+fast it's already moving). Velocity, in turn, depends only on the
+current velocity and the acceleration. So two numbers are necessary —
+and sufficient:
 
-At every time step you have **two independent, imperfect sources of
-information** about where something is:
+$$
+x_k = \begin{bmatrix} p_k \\ v_k \end{bmatrix}
+\qquad \text{(position, velocity)}
+$$
 
-1. **A prediction from physics** — "if it was here last step, moving at this
-   speed, it should be roughly *there* now."
-2. **A noisy measurement** — "my sensor / eyes say it's roughly *there*."
+We don't put acceleration in the state because we already *know* the
+commanded acceleration $u$ at every step — it's an input, not something
+to be estimated. (If $u$ were unknown too, *then* you'd add it to the
+state. That's a design choice, not a law of nature.)
 
-Neither one alone is trustworthy. But if you know *how* imprecise each one
-is, you can combine them statistically so that the combination is **more
-accurate than either alone**. That combination is a Kalman Filter update.
+Crucially, the Ninja's eyes will only ever report $p$. Velocity is
+never measured — everything the filter ever knows about $v_k$ comes
+from this state choice plus the motion model below. That's the payoff
+of choosing the state this way: the filter can infer an unmeasured
+quantity for free, just by knowing how it's coupled to something that
+*is* measured.
 
-The trick that makes this tractable is assuming every uncertain quantity is
-**Gaussian** (bell-curve) distributed, described completely by a mean and a
-covariance. Gaussians have a wonderful property: the product of two
-Gaussians is (proportional to) another Gaussian, and there is a closed-form
-formula for its mean and variance. The whole Kalman Filter is essentially
-"repeatedly multiply two Gaussians together and keep track of the result."
+### Step 1 — start from continuous physics, in words
 
----
+Basic kinematics, for one axis, under acceleration $a$:
 
-## 2. Setting up the quail-tracking model
+$$
+\dot p = v, \qquad \dot v = a
+$$
 
-### 2.1 The state
+("position changes at rate velocity; velocity changes at rate
+acceleration" — that's the whole physics content of this model.)
 
-We describe the quail at time `k` by a **state vector**:
+### Step 2 — discretize: freeze $a$ over one small timestep $dt$
 
-```
-x_k = [ position ]
-      [ velocity ]
-```
+We don't simulate continuously; we take one step every $dt$ seconds and
+assume acceleration is roughly constant over that short interval. The
+standard constant-acceleration kinematic equations for that one step
+are:
 
-We don't measure velocity directly (the Ninja can't clock the quail's
-speed by eye), but the filter will *infer* it anyway — that's one of the
-Kalman Filter's superpowers.
+$$
+p_{k+1} = p_k + v_k\,dt + \tfrac12 a\, dt^2
+\qquad\qquad
+v_{k+1} = v_k + a\,dt
+$$
 
-### 2.2 The motion model (how physics predicts the next state)
+(If this looks unfamiliar: it's the same $x = x_0 + v_0 t + \tfrac12 a
+t^2$ from a first physics course, just relabeled with subscript $k$ for
+"current step" and $k+1$ for "next step.")
 
-Basic kinematics: if you know position `p`, velocity `v`, and a constant
-acceleration `u` applied over a short interval `dt`:
+Split $a$ into the part we command, $u$, plus a small random wobble
+$w_k$ the Quail adds on its own (real acceleration is never *exactly*
+what you commanded):
 
-```
-p_{k+1} = p_k + v_k*dt + (1/2)*u*dt^2
-v_{k+1} = v_k + u*dt
-```
+$$
+a = u + w_k, \qquad w_k \sim \mathcal N(0, \sigma_a^2)
+$$
 
-Written as matrices, this becomes `x_{k+1} = A*x_k + B*u`:
+Substituting:
 
-```
-A = [ 1   dt ]        B = [ dt^2/2 ]
-    [ 0    1 ]            [   dt   ]
-```
+$$
+p_{k+1} = \underbrace{p_k + v_k\,dt}_{\text{from old state}} + \underbrace{\tfrac12 u\,dt^2}_{\text{known input}} + \underbrace{\tfrac12 w_k\,dt^2}_{\text{noise}}
+$$
+$$
+v_{k+1} = \underbrace{v_k}_{\text{from old state}} + \underbrace{u\,dt}_{\text{known input}} + \underbrace{w_k\,dt}_{\text{noise}}
+$$
 
-* `A` is the **state transition matrix** — "roll the state forward
-  assuming no new forces."
-* `B` is the **control matrix** — "here's how a *known* commanded input
-  (acceleration `u`) additionally pushes the state."
+### Step 3 — read the matrices straight off those two lines
 
-This is exactly `A` and `B` in the MATLAB script and in
-`kf_quail_tracking.py`.
+Stack $p_{k+1}, v_{k+1}$ into a vector and split each equation into
+"coefficient on $p_k$", "coefficient on $v_k$", and "coefficient on
+$u$":
 
-### 2.3 The measurement model (how the sensor relates to the state)
+$$
+\begin{bmatrix} p_{k+1} \\ v_{k+1} \end{bmatrix}
+=
+\underbrace{\begin{bmatrix} 1 & dt \\ 0 & 1 \end{bmatrix}}_{A}
+\begin{bmatrix} p_k \\ v_k \end{bmatrix}
++
+\underbrace{\begin{bmatrix} dt^2/2 \\ dt \end{bmatrix}}_{B} u
++ \text{noise}
+$$
 
-The Ninja's eyes report a noisy position reading `y`. In terms of the
-state:
+Every entry of $A$ and $B$ is just "which old term multiplies which new
+term" in the two kinematic equations above — nothing more is happening.
+Row 1 of $A$, $[1 \ \ dt]$, says "new position = 1×(old position) +
+$dt$×(old velocity)"; row 2, $[0 \ \ 1]$, says "new velocity = 0×(old
+position) + 1×(old velocity)". $B=[dt^2/2;\ dt]$ is the same read-off
+for the $u$-terms. So:
 
-```
-y_k = C*x_k + noise,      C = [ 1   0 ]
-```
+$$
+x_{k+1} = A x_k + B u, \qquad
+A = \begin{bmatrix} 1 & dt \\ 0 & 1 \end{bmatrix}, \quad
+B = \begin{bmatrix} dt^2/2 \\ dt \end{bmatrix}
+$$
 
-`C` just says "the thing I measure is the first entry of the state
-(position), and I don't measure the second entry (velocity) at all."
+### Step 4 — the measurement model
 
-### 2.4 Two flavors of noise
+The Ninja's eyes report position only — literally "take the state
+vector and keep the 1st entry, drop the 2nd":
 
-* **Process noise** `Ex` (a.k.a. `Q` in most textbooks — renamed here to
-  avoid clashing with the state variable `Q` used for "quail" in the
-  MATLAB code) — captures that the quail's *actual* acceleration wobbles
-  around the commanded value `u`. If acceleration noise has std-dev
-  `σ_a`, then because position gets a `dt²/2` factor and velocity gets a
-  `dt` factor, the covariance of the resulting state noise is:
+$$
+y_k = C x_k + \text{noise}, \qquad C = \begin{bmatrix} 1 & 0 \end{bmatrix}
+$$
 
-  ```
-  Ex = σ_a^2 * [ dt^4/4   dt^3/2 ]
-               [ dt^3/2   dt^2   ]
-  ```
+$C$ is a **selection matrix**: $C x_k = [1\ \ 0]\begin{bmatrix}p_k\\v_k\end{bmatrix} = p_k$. If the sensor instead measured velocity too, $C$ would be the $2\times2$ identity; if it measured a *scaled* position (say, pixels instead of meters), $C$ would hold that scale factor instead of a bare $1$. The general rule: $C$ encodes whatever known, linear arithmetic converts state into sensor reading.
 
-  This is the standard "constant-acceleration white noise" model — the
-  off-diagonal terms exist because a *single* random acceleration burst
-  affects position and velocity in a *correlated* way (more acceleration
-  noise → both a bigger position kick and a bigger velocity kick,
-  together, not independently).
+### Step 5 — turn the leftover noise term into a covariance matrix, $E_x$
 
-* **Measurement noise** `Ez` (a.k.a. `R`) — how bad the Ninja's eyesight
-  is: `Ez = σ_vision²`.
+The noise term we dropped above, on both equations at once, is:
 
----
+$$
+\begin{bmatrix} \tfrac12 w_k\,dt^2 \\ w_k\,dt \end{bmatrix}
+= \underbrace{\begin{bmatrix} dt^2/2 \\ dt \end{bmatrix}}_{=B,\ \text{call it } g}\, w_k
+$$
 
-## 3. Deriving the Kalman Filter equations
+Notice this is exactly $B$ again — makes sense, since the *noise* is
+just an unplanned little bit of acceleration, and it enters the state
+the same way the commanded acceleration $u$ does. A single scalar random
+variable $w_k$, multiplying a fixed vector $g$, has covariance (this is
+the vector version of $\mathrm{Var}(cX) = c^2\mathrm{Var}(X)$):
 
-The filter alternates between two steps, forever:
+$$
+\mathrm{Cov}(g\,w_k) = g\,g^\top\,\mathrm{Var}(w_k) = \sigma_a^2\, g g^\top
+$$
 
-### Step A — Predict (a.k.a. "time update")
+Multiply it out:
 
-Push last step's belief through the physics model:
+$$
+g g^\top =
+\begin{bmatrix} dt^2/2 \\ dt \end{bmatrix}
+\begin{bmatrix} dt^2/2 & dt \end{bmatrix}
+=
+\begin{bmatrix} dt^4/4 & dt^3/2 \\ dt^3/2 & dt^2 \end{bmatrix}
+$$
 
-```
-x̂_k⁻ = A * x̂_{k-1} + B*u                       (predicted mean)
-P_k⁻  = A * P_{k-1} * Aᵀ + Ex                    (predicted covariance)
-```
+so
 
-*Why does covariance transform as `A P Aᵀ`?* If `x` has covariance `P`,
-then any linear transform `A*x` has covariance `A*P*Aᵀ` — this is just the
-multivariate version of "Var(aX) = a²Var(X)". We then add `Ex` because the
-motion model itself is not perfect — every prediction step also injects
-fresh uncertainty.
+$$
+E_x = \sigma_a^2
+\begin{bmatrix} dt^4/4 & dt^3/2 \\ dt^3/2 & dt^2 \end{bmatrix}
+$$
 
-At this point we have a **prior belief**: a Gaussian
-`N(x̂_k⁻, P_k⁻)` about where the quail is, before looking at this step's
+This is why the off-diagonal terms exist: they're not a separate
+assumption bolted on, they fall directly out of squaring the *same*
+vector $g$ that appears in $B$. One random acceleration burst nudges
+position and velocity **together**, because both come from the same
+$w_k$ — so their errors are correlated, not independent.
+
+Finally, $E_z=\sigma_{vision}^2$ is simpler: the measurement noise
+enters $y_k$ directly (scalar in, scalar out), so its covariance is just
+its own variance, no matrix algebra required.
+
+**Summary of what we just derived, in one place:**
+
+| symbol | what it is | derived from |
+|---|---|---|
+| $x_k=[p_k,v_k]^\top$ | the state | Step 0: minimal info needed to predict the future |
+| $A$ | state transition | Step 3: coefficients of $p_k,v_k$ in the kinematic equations |
+| $B$ | control effect | Step 3: coefficients of $u$ in the kinematic equations |
+| $C$ | measurement selection | Step 4: which state entries the sensor reads out |
+| $E_x$ | process noise covariance | Step 5: $\sigma_a^2 g g^\top$, where $g$ is $B$'s vector |
+| $E_z$ | measurement noise covariance | variance of the sensor's own noise |
+
+## 1.2 Deriving the filter: predict, then update
+
+The whole filter is two steps, repeated forever.
+
+### Predict — roll the belief forward through physics
+
+$$
+\hat{x}_k^- = A \hat{x}_{k-1} + Bu
+\qquad\qquad
+P_k^- = A P_{k-1} A^\top + E_x
+$$
+
+*Why $A P A^\top$?* If $x$ has covariance $P$, any linear transform $Ax$
+has covariance $APA^\top$ — the matrix version of $\mathrm{Var}(aX)=a^2\mathrm{Var}(X)$.
+We add $E_x$ because the motion model itself isn't perfect — every
+prediction injects a little fresh uncertainty.
+
+At this point we have a **prior belief**: a Gaussian $\mathcal N(\hat
+x_k^-, P_k^-)$ about where the Quail is, *before* looking at this step's
 measurement.
 
-### Step B — Update (a.k.a. "measurement update")
+### Update — fuse in the measurement
 
-Now the Ninja actually looks. We have a second Gaussian, this time from the
-measurement: it says the position is around `y_k` with variance `Ez`.
-Multiplying the two Gaussians (prior × likelihood) gives another Gaussian —
-this is Bayes' rule for Gaussians, and its mean and variance work out to:
+$$
+\tilde y_k = y_k - C\hat x_k^- \quad\text{(innovation)}
+\qquad
+S_k = CP_k^-C^\top + E_z \quad\text{(innovation covariance)}
+$$
 
-```
-innovation:        ỹ_k = y_k − C*x̂_k⁻            (measurement minus what we expected to see)
-innovation covar:  S_k = C*P_k⁻*Cᵀ + Ez
-Kalman gain:       K_k = P_k⁻*Cᵀ*S_k⁻¹
-posterior mean:    x̂_k = x̂_k⁻ + K_k*ỹ_k
-posterior covar:   P_k = (I − K_k*C)*P_k⁻
-```
+$$
+K_k = P_k^- C^\top S_k^{-1} \quad\text{(Kalman gain)}
+$$
 
-**Intuition for the Kalman gain `K`:** it's a *trust ratio*.
+$$
+\hat x_k = \hat x_k^- + K_k \tilde y_k
+\qquad\qquad
+P_k = (I - K_k C) P_k^-
+$$
 
-* If the measurement is very noisy (`Ez` huge) relative to the prediction
-  uncertainty (`P`), then `S` is dominated by `Ez`, so `K → 0` — the
-  filter mostly ignores the measurement and trusts the physics prediction.
-* If the prediction is very uncertain (`P` huge) relative to measurement
-  noise, then `K → C⁻¹`-ish — the filter mostly trusts the measurement and
-  throws away the prediction.
-* In general `K` is a soft blend that is provably the **minimum-variance**
-  (most precise) way to combine the two, given the noise assumptions.
+**The Kalman gain $K$ is a trust ratio.** It falls out of multiplying two
+Gaussians (prior × measurement likelihood) — or equivalently, out of
+choosing $K$ to minimize the posterior variance. Either derivation gives
+exactly this $K$, which is why the KF is called the *optimal linear
+unbiased estimator*.
 
-*Where does `x̂_k = x̂_k⁻ + K_k*ỹ_k` come from, concretely?* You can derive
-it either by (a) completing the square on the product of two Gaussian PDFs,
-or (b) minimizing the trace of the posterior covariance `P_k` over choices
-of gain `K` (set `dP_k/dK = 0` and solve). Both routes give exactly the `K`
-above — this is why the Kalman Filter is called the "optimal linear
-unbiased estimator": no other linear combination of prediction and
-measurement produces a lower-variance estimate.
+- Measurement much noisier than the prediction ($E_z \gg P$) → $S$ is
+  dominated by $E_z$ → $K \to 0$ → **trust the model.**
+- Prediction much less certain than the measurement ($P \gg E_z$) → $K$
+  grows → **trust the measurement.**
 
-That's it — that's the whole filter. Every "Kalman Filter" you'll ever see
-is this predict/update pair, just with bigger matrices.
+That's the entire filter. Every "Kalman Filter" you'll ever meet is this
+predict/update pair, just with bigger matrices.
 
----
+## 1.3 Worked example: three steps, real numbers
 
-## 4. Worked numeric example, by hand, one full step
+Setup: $dt=0.1$, $u=1.5$, $\sigma_a=0.05$, $\sigma_{vision}=10$, starting
+belief $\hat x_0 = [0,0]^\top$, $P_0 = E_x$. Three fixed (hand-chosen, not
+random) measurements: $y_1=12.3$, $y_2=5.8$, $y_3=9.4$.
 
-Let's hand-trace the first three iterations with the tutorial's actual
-numbers, so nothing is a black box. Every number below is the **literal
-console output** of `kf_stepbystep.py` — run it yourself
-(`python3 kf_stepbystep.py`) and you'll see this exact printout, digit for
-digit. Nothing here is rounded-off-by-hand or approximated.
+| step | measurement $y$ | predicted $\hat x^-=(p,v)$ | prior $P^-_{pp}$ | gain $K$ (pos, vel) | posterior $\hat x=(p,v)$ |
+|---|---|---|---|---|---|
+| 1 | 12.3 | (0.0075, 0.150) | $6.25\times10^{-7}$ | $(6.25\times10^{-9},\ 5.00\times10^{-8})$ | (0.0075, 0.1500) |
+| 2 | 5.8  | (0.0300, 0.300) | $2.19\times10^{-6}$ | $(2.19\times10^{-8},\ 1.13\times10^{-7})$ | (0.0300, 0.3000) |
+| 3 | 9.4  | (0.0675, 0.450) | $5.25\times10^{-6}$ | $(5.25\times10^{-8},\ 2.00\times10^{-7})$ | (0.0675, 0.4500) |
 
-**Setup:** `dt = 0.1`, `u = 1.5`, `σ_a = 0.05` (accel_noise_mag),
-`σ_vision = 10` (vision_noise_mag).
+*(Run `kf_stepbystep.py` to see every one of these numbers printed with
+full precision, plus $S$ and the full $2\times2$ $P$ matrix at each step.)*
 
-```
-A =
- [[1.  0.1]
-  [0.  1. ]]
-B =
- [[0.005]
-  [0.1  ]]
-C =
- [[1 0]]
-Ex (process noise covariance) =
- [[6.25e-08 1.25e-06]
-  [1.25e-06 2.50e-05]]
-Ez (measurement noise variance) = 100.0
-```
+**The one thing to actually notice:** the gain $K$ is tiny — around
+$10^{-8}$. Even though the measurements (12.3, 5.8, 9.4) look nothing like
+the predictions (~0.01–0.07), the posterior barely moves toward them. This
+is not a bug. $E_z=100$ is many orders of magnitude bigger than $E_x\sim
+10^{-6}$, so the filter has correctly concluded the physics model is far
+more trustworthy than this measurement. **This is a real and useful
+behavior, but it also means this specific example undersells how much the
+gain can vary** — see the callout below.
 
-**Initial belief:** `x̂_0 = [0, 0]ᵀ`, `P_0 = Ex` (we start as uncertain as one
-process-noise step).
+> **How much does the gain actually vary?** Steady-state gain (after many
+> steps, once $P$ stops changing) for different noise ratios:
+>
+> | regime | $\sigma_a$ | $\sigma_{vision}$ | steady-state $K_{pos}$ |
+> |---|---|---|---|
+> | this tutorial | 0.05 | 10 | ≈ 0.005 — trust the model almost completely |
+> | balanced | 2.0 | 3.0 | ≈ 0.11 — model wins, but measurement matters |
+> | noisy flier, sharp eyes | 8.0 | 1.0 | ≈ 0.33 — trust the measurement noticeably more |
+>
+> Try it yourself: change `accel_noise_mag` / `vision_noise_mag` near the
+> top of `kf_quail_tracking.py` and re-run — nothing else in the code
+> changes, only the filter's whole "personality."
 
-To keep this section reproducible with pen and paper, the "measurements"
-below are **hand-chosen fixed numbers** (12.3, 5.8, 9.4) rather than random
-draws — think of them as three specific eye-glances the Ninja happened to
-report.
+## 1.4 Watching it actually converge
 
-### Step 1 — measurement y₁ = 12.3
+Numbers in a table only go so far — here's what the filter does across
+the full 10-second flight.
 
-```
--- Predict --
-x_pred = A @ x_est + B*u =
- [[0.0075]
-  [0.15  ]]
-P_pred = A @ P @ A.T + Ex =
- [[6.25e-07 5.00e-06]
-  [5.00e-06 5.00e-05]]
+**`plots/kf_convergence.png`** is the headline plot: the true position
+(red), the raw noisy measurements (gray dots), the KF estimate (green
+line), and a shaded green band showing the filter's own $\pm 2\sigma$
+confidence region. Watch the green line track the red one closely while
+the gray dots scatter wildly around both — and watch the band's width
+change as $P$ evolves.
 
--- Update --
-innovation = y_1 - C@x_pred = 12.3 - 0.007500 = 12.292500
-S = C@P_pred@C.T + Ez = 0.000001 + 100.0 = 100.000001
-K = P_pred @ C.T / S =
- [[6.25e-09]
-  [5.00e-08]]
-x_est = x_pred + K*innovation =
- [[0.0075]
-  [0.15  ]]
-P = (I - K@C) @ P_pred =
- [[6.25e-07 5.00e-06]
-  [5.00e-06 5.00e-05]]
-```
+**`plots/kf_error.png`** plots $|\text{error}|$ over time for the raw
+measurement vs. the KF estimate side by side — the filtered error stays
+low and stable while the raw error stays noisy throughout.
 
-Look closely at `K`: it's on the order of **1e-8 to 1e-9** — essentially
-zero. That's why `x_est` barely moved from `x_pred` even though the
-measurement (12.3) was wildly different from the prediction (0.0075). This
-is not a bug — it's the correct, honest behavior of the equations given
-these specific noise numbers, and it's worth understanding *why*, which
-Section 4.1 below explains.
+**`plots/kf_distributions.png`** zooms into four specific instants and
+draws the actual bell curves being multiplied together: the predicted
+(prior) belief, the measurement's likelihood, and the resulting posterior
+— with the true position marked — so you can see Bayes' rule happening,
+not just its outcome.
 
-### Step 2 — measurement y₂ = 5.8
-
-```
--- Predict --
-x_pred = A @ x_est + B*u =
- [[0.03]
-  [0.3 ]]
-P_pred = A @ P @ A.T + Ex =
- [[2.1875e-06 1.1250e-05]
-  [1.1250e-05 7.5000e-05]]
-
--- Update --
-innovation = y_2 - C@x_pred = 5.8 - 0.030000 = 5.770000
-S = C@P_pred@C.T + Ez = 0.000002 + 100.0 = 100.000002
-K = P_pred @ C.T / S =
- [[2.1875e-08]
-  [1.1250e-07]]
-x_est = x_pred + K*innovation =
- [[0.03]
-  [0.3 ]]
-P = (I - K@C) @ P_pred =
- [[2.1875e-06 1.1250e-05]
-  [1.1250e-05 7.5000e-05]]
-```
-
-### Step 3 — measurement y₃ = 9.4
-
-```
--- Predict --
-x_pred = A @ x_est + B*u =
- [[0.0675]
-  [0.45  ]]
-P_pred = A @ P @ A.T + Ex =
- [[5.25e-06 2.00e-05]
-  [2.00e-05 1.00e-04]]
-
--- Update --
-innovation = y_3 - C@x_pred = 9.4 - 0.067500 = 9.332500
-S = C@P_pred@C.T + Ez = 0.000005 + 100.0 = 100.000005
-K = P_pred @ C.T / S =
- [[5.25e-08]
-  [2.00e-07]]
-x_est = x_pred + K*innovation =
- [[0.067501]
-  [0.450003]]
-P = (I - K@C) @ P_pred =
- [[5.25e-06 2.00e-05]
-  [2.00e-05 1.00e-04]]
-```
-
-Notice `P` keeps growing every step (6.25e-7 → 2.2e-6 → 5.25e-6 on the
-diagonal) — that's the process noise `Ex` accumulating faster than the
-tiny `K` can shrink it back down by trusting measurements. **Run
-`kf_quail_tracking.py` and look at `plots/kf_distributions.png` to see this
-same prior/measurement/posterior fusion happening visually, further into
-the 10‑second simulation where `P` has grown enough for the gain to matter
-more.**
-
-### 4.1 Wait — is `kf_quail_tracking.py` actually a *good* teaching example?
-
-Partially. The story (Ninja, Quail) is a fine narrative hook, and the
-mechanics are 100% correct — but with these specific parameters
-(`σ_a = 0.05`, `σ_vision = 10`), the Kalman gain stays tiny for a very long
-time (it's still only ~0.005 after 100 steps — see the table below), so if
-you only trace 1–3 steps by hand, you'll come away thinking "the update
-step barely does anything, so why bother?" That's a real risk with this
-specific example, and worth naming honestly rather than glossing over.
-
-The reason the gain is so small: `Ex`'s diagonal (~1e-6 to 1e-8) is
-**many orders of magnitude smaller** than `Ez` (=100). The filter has
-concluded, correctly, that its physics-based prediction is far more
-trustworthy than this Ninja's terrible eyesight — so it should barely
-budge from the model. This is actually a realistic and useful lesson (a
-very accurate model + a very noisy sensor *should* produce a filter that
-leans almost entirely on the model), but it undersells the "blending"
-intuition that makes the Kalman gain interesting in the first place.
-
-To see the gain actually blend in a way you can feel, compare three noise
-regimes side-by-side (same `A`, `B`, `C`, only `σ_a` and `σ_vision` change),
-looking at the **steady-state** gain (i.e., after the filter has been
-running long enough for `P` to stop changing much):
-
-| Regime | `σ_a` (process) | `σ_vision` (measurement) | steady-state `K[position]` | Interpretation |
-|---|---|---|---|---|
-| **This tutorial's quail** | 0.05 | 10 | ≈ 0.005 | trust the *model* almost completely |
-| **Balanced** | 2.0 | 3.0 | ≈ 0.109 | lean on the model, but the measurement matters |
-| **Noisy flier, sharp eyes** | 8.0 | 1.0 | ≈ 0.329 | trust the *measurement* noticeably more |
-
-(You can reproduce this table yourself: it's just `kf_stepbystep.py`'s
-predict/update loop run for 200 steps with different `accel_noise_mag` /
-`vision_noise_mag` values instead of 3 steps with the tutorial's defaults.)
-
-**Bottom line:** keep `kf_quail_tracking.py` for the story and the
-"recovering unmeasured velocity" demonstration — that part is genuinely
-illustrative. But when you want to *feel* the Kalman gain trade off model
-vs. measurement, mentally swap in the "balanced" or "sharp eyes" row above,
-or edit `accel_noise_mag` / `vision_noise_mag` near the top of the script
-and re-run it — the code doesn't change at all, only the two noise
-numbers, which is itself a nice demonstration of how much those two
-numbers alone control the filter's entire personality.
+**`plots/kf_velocity.png`** shows the filter recovering velocity, a
+quantity that is *never measured at all*, purely from how position and
+the motion model relate.
 
 ---
 
-## 5. Reading the KF code, line by line
+# Part 2 — From KF to EKF
 
-> If you want to watch the predict/update math execute one line at a time
-> with printed matrices, run `kf_stepbystep.py` instead — it's the same
-> filter with the randomness removed, and its output is exactly what
-> Section 4 above shows.
+## 2.1 Why linear isn't always enough
 
-`kf_quail_tracking.py` mirrors the math above 1:1:
+Everything above relied on both models being **linear**: $x_{k+1}=Ax_k+Bu$
+and $y_k = Cx_k$. Now the Ninja trades his direct-vision eyes for a
+rangefinder + compass:
 
-* **Sections 1–3** build `A, B, C, Ex, Ez` exactly as derived above.
-* **Section 4** simulates *ground truth*: it rolls the *true* quail state
-  forward with real (unknown to the filter) process noise, and generates
-  a noisy measurement from it. This block exists purely so we have
-  something to compare the filter against — a real Ninja wouldn't have
-  it.
-* **Section 5** is the filter itself:
-  ```python
-  Q_est = A @ Q_est + B * u        # predict mean
-  P = A @ P @ A.T + Ex              # predict covariance
-  ...
-  K = (P @ C.T) / S                 # Kalman gain
-  Q_est = Q_est + K * innovation     # update mean
-  P = (np.eye(2) - K @ C) @ P        # update covariance
-  ```
-  This is exactly Step A / Step B from Section 3, applied at every `k`.
-* **Section 6** plots:
-  - `kf_position.png` — you'll see the green (filtered) line hug the red
-    (true) line far more tightly than the noisy black dots do.
-  - `kf_velocity.png` — the filter recovers a state (velocity) **that was
-    never measured at all**, purely from how position changes over time
-    combined with the motion model.
-  - `kf_covariance.png` — the posterior variance is always ≤ the
-    predicted (prior) variance — every measurement can only make you more
-    certain, never less (this is a mathematical guarantee of the update
-    equation, not a coincidence).
-  - `kf_distributions.png` — literally plots the three Gaussians
-    (prior/prediction, measurement likelihood, posterior) at a few
-    timesteps, so you can *see* Bayes' rule happening.
+$$
+h(x,y) = \begin{bmatrix} r \\ \theta \end{bmatrix}
+= \begin{bmatrix} \sqrt{x^2+y^2} \\ \operatorname{atan2}(y,x) \end{bmatrix}
+$$
 
----
+There is no matrix $C$ with $h(\text{state}) = C \cdot \text{state}$ — this
+is genuinely nonlinear. If the state is Gaussian, $\sqrt{x^2+y^2}$ is not
+exactly Gaussian, so the clean KF machinery breaks.
 
-## 6. From KF to EKF: why linear isn't always enough
+**The EKF's fix:** linearize $h$ locally, around the current estimate,
+with a first-order Taylor expansion:
 
-Everything above relied on two things being **linear**:
+$$
+h(x) \approx h(\hat x) + H(x - \hat x), \qquad
+H = \left.\frac{\partial h}{\partial x}\right|_{\hat x}
+$$
 
-```
-x_{k+1} = A*x_k + B*u        (motion model)
-y_k     = C*x_k               (measurement model)
-```
+$H$ (the **Jacobian**) slots in exactly where $C$ used to go — but it must
+be **recomputed at every timestep**, since it depends on where the filter
+currently thinks it is. That recomputation is the entire idea of "extended."
 
-But lots of real sensors and real dynamics are **not linear**. Our Ninja
-now trades his magic direct-position vision for a rangefinder + compass —
-a totally realistic sensor. It reports:
+## 2.2 The state, and the Jacobian, derived by hand
 
-```
-r     = sqrt(x^2 + y^2)     (distance to the quail)
-theta = atan2(y, x)         (bearing angle to the quail)
-```
+### Which states to focus on, again
 
-This `h(state) = [r; theta]` is **nonlinear** in `x` and `y` — there's no
-matrix `C` such that `h(state) = C * state`. So the clean "Gaussian in →
-Gaussian out" machinery from Section 3 breaks: if `state` is Gaussian,
-`sqrt(x²+y²)` is *not* exactly Gaussian.
+Same logic as Step 0 in Part 1, just applied twice — once per axis. The
+Quail now moves in a plane, so predicting its future position needs
+both position *and* velocity **on each axis**:
 
-**The EKF's trick:** approximate `h` as linear *locally*, around the
-current best estimate, using a first-order Taylor expansion:
+$$
+s = \begin{bmatrix} x \\ v_x \\ y \\ v_y \end{bmatrix}
+$$
 
-```
-h(state) ≈ h(x̂) + H * (state − x̂),      where H = ∂h/∂state |_{x̂}
-```
+Nothing new here: $x,v_x$ obey exactly the same constant-acceleration
+kinematics as $p,v$ did in Part 1, and so do $y,v_y$, independently
+(a sideways nudge doesn't change the forward-acceleration equations,
+and vice versa). So $A$ and $B$ are just two side-by-side copies of
+Part 1's $A,B$, one block per axis — re-derive them by repeating
+Steps 1–3 above once for $x$ and once for $y$ if you want to see it
+written out; the algebra is identical.
 
-`H` is the **Jacobian** of `h`. Once you have `H`, you plug it in
-*exactly where `C` used to go* in the KF update equations. That's the
-entire idea of the EKF: **re-derive a local linear approximation at every
-single time step**, then run ordinary KF math on that approximation.
+### The only genuinely new piece: $H$
 
-The same idea applies if the *motion* model is nonlinear (e.g., a car
-turning at a fixed steering angle) — you'd linearize `A` via a Jacobian
-`F` too. In our example the motion stays linear (constant velocity), only
-the sensor is nonlinear, which keeps the comparison to the plain KF clean.
+The sensor no longer reads out a state entry directly (there's no row
+of 0s/1s that produces "distance" from $[x,v_x,y,v_y]$) — it reports a
+*nonlinear function* of the state, $h(s) = [r,\theta]^\top$. The
+Jacobian $H$ is the matrix of partial derivatives of $h$ with respect
+to every state variable, evaluated at the current estimate — it's
+"how much does each output change per unit change in each state
+entry, right now." Let $r=\sqrt{x^2+y^2}$.
 
----
+**Row 1 — range, $r=\sqrt{x^2+y^2}=(x^2+y^2)^{1/2}$.** Differentiate
+with the chain rule, treating $y$ as constant for $\partial/\partial x$:
 
-## 7. Deriving the Extended Kalman Filter equations
+$$
+\frac{\partial r}{\partial x}
+= \frac{1}{2}(x^2+y^2)^{-1/2}\cdot 2x
+= \frac{x}{\sqrt{x^2+y^2}} = \frac{x}{r}
+$$
 
-### 7.1 State (now 2-D flight)
+and by the same steps (swap $x\leftrightarrow y$), $\partial r/\partial
+y = y/r$. Neither $v_x$ nor $v_y$ appears in $r$ at all — range depends
+only on where the Quail *is*, not how fast it's moving — so both of
+those partials are $0$:
 
-```
-s = [ x  ]
-    [ vx ]
-    [ y  ]
-    [ vy ]
-```
+$$
+\frac{\partial r}{\partial x} = \frac{x}{r}, \qquad
+\frac{\partial r}{\partial y} = \frac{y}{r}, \qquad
+\frac{\partial r}{\partial v_x} = \frac{\partial r}{\partial v_y} = 0
+$$
 
-Motion is still linear (constant velocity + known acceleration `u=[ax,ay]`),
-so `A` and `B` are just two independent copies of the 1‑D KF's `A, B`,
-block-stacked — no new ideas here.
+**Row 2 — bearing, $\theta=\operatorname{atan2}(y,x)$.** For $x>0$ this
+is the same function as $\theta=\arctan(y/x)$ (atan2 just extends it to
+handle all four quadrants and $x=0$; the derivative formula below is the
+one that's valid everywhere, quadrant issues included). Using
+$\frac{d}{du}\arctan(u) = \frac{1}{1+u^2}$ with $u=y/x$, and the chain
+rule for $\partial u/\partial x = -y/x^2$:
 
-### 7.2 Nonlinear measurement function
+$$
+\frac{\partial \theta}{\partial x}
+= \frac{1}{1+(y/x)^2}\cdot\left(-\frac{y}{x^2}\right)
+= \frac{x^2}{x^2+y^2}\cdot\left(-\frac{y}{x^2}\right)
+= \frac{-y}{x^2+y^2} = \frac{-y}{r^2}
+$$
 
-```
-h(s) = [ sqrt(x^2+y^2) ]
-       [ atan2(y, x)   ]
-```
+and similarly, with $\partial u/\partial y = 1/x$:
 
-### 7.3 The Jacobian, derived by hand
+$$
+\frac{\partial \theta}{\partial y}
+= \frac{1}{1+(y/x)^2}\cdot\frac{1}{x}
+= \frac{x^2}{x^2+y^2}\cdot\frac{1}{x}
+= \frac{x}{x^2+y^2} = \frac{x}{r^2}
+$$
 
-We need `H = ∂h/∂s`, a 2×4 matrix (2 measurement outputs, 4 state
-variables). Let `r = sqrt(x²+y²)`.
+Again, velocity doesn't appear in $\theta$ (bearing only depends on
+where the Quail is), so those two partials are $0$ too:
 
-**Row 1 — range `r` w.r.t. each state variable:**
+$$
+\frac{\partial \theta}{\partial x} = \frac{-y}{r^2}, \qquad
+\frac{\partial \theta}{\partial y} = \frac{x}{r^2}, \qquad
+\frac{\partial \theta}{\partial v_x} = \frac{\partial \theta}{\partial v_y} = 0
+$$
 
-```
-∂r/∂x  = x / r                (chain rule on sqrt(x²+y²))
-∂r/∂y  = y / r
-∂r/∂vx = 0    (range doesn't depend on velocity directly)
-∂r/∂vy = 0
-```
+**Stack the two rows** (row = output, column = state variable, in the
+order $x,v_x,y,v_y$) to get $H$:
 
-**Row 2 — bearing `θ = atan2(y,x)` w.r.t. each state variable:**
+$$
+H = \begin{bmatrix} x/r & 0 & y/r & 0 \\ -y/r^2 & 0 & x/r^2 & 0 \end{bmatrix}
+$$
 
-Recall `d/dx[atan2(y,x)] = -y/(x²+y²)` and `d/dy[atan2(y,x)] = x/(x²+y²)`
-(standard result — differentiate `θ=arctan(y/x)` and handle the chain rule
-through `x²+y²`, or just accept it as the well-known gradient of
-`atan2`).
+Because $x,y$ (and therefore $r$) change every step, $H$ must be
+re-evaluated fresh, **every step**, at wherever the filter currently
+thinks it is — it is not a fixed matrix the way $A$, $B$, $C$ were in
+Part 1.
 
-```
-∂θ/∂x  = -y / r²
-∂θ/∂y  =  x / r²
-∂θ/∂vx = 0
-∂θ/∂vy = 0
-```
+## 2.3 The EKF equations
 
-Putting it together (columns ordered `x, vx, y, vy`):
+$$
+\underbrace{\hat s_k^- = A\hat s_{k-1}+Bu,\quad P_k^- = AP_{k-1}A^\top+E_x}_{\text{predict — identical in spirit to the KF}}
+$$
 
-```
-H = [  x/r,   0,   y/r,   0 ]
-    [ -y/r²,  0,   x/r²,  0 ]
-```
+$$
+\underbrace{H_k = \left.\dfrac{\partial h}{\partial s}\right|_{\hat s_k^-}}_{\text{NEW: linearize here, fresh}}
+\qquad
+\tilde z_k = z_k - h(\hat s_k^-)\ \ \text{\small(use the exact nonlinear $h$, not $H\hat s$!)}
+$$
 
-This `H` is **evaluated at the current predicted state estimate**, fresh,
-every single timestep — that's the "extended" part of EKF: the KF's
-constant matrix `C` is replaced by a matrix that's recomputed at every
-step from wherever the filter currently thinks it is.
+$$
+S_k = H_kP_k^-H_k^\top + R, \qquad K_k = P_k^-H_k^\top S_k^{-1}
+$$
 
-### 7.4 The EKF predict/update equations
+$$
+\hat s_k = \hat s_k^- + K_k\tilde z_k, \qquad P_k = (I-K_kH_k)P_k^-
+$$
 
-```
-Predict:
-  ŝ_k⁻ = A * ŝ_{k-1} + B*u          <- still exactly linear
-  P_k⁻  = A * P_{k-1} * Aᵀ + Ex
+Two details that matter in the code:
 
-Update:
-  H_k = Jacobian of h(·) evaluated at ŝ_k⁻          <- NEW STEP vs. plain KF
-  innovation:  z̃_k = z_k − h(ŝ_k⁻)                   <- use the TRUE nonlinear h() here, not H!
-  S_k = H_k*P_k⁻*H_kᵀ + R
-  K_k = P_k⁻*H_kᵀ*S_k⁻¹
-  ŝ_k = ŝ_k⁻ + K_k*z̃_k
-  P_k = (I − K_k*H_k)*P_k⁻
-```
+1. **The innovation uses the real nonlinear $h(\hat s)$**, not $H\hat s$ —
+   the Jacobian is only for propagating uncertainty and computing the
+   gain.
+2. **Bearing wraps around a circle.** A naive $\theta_{meas}-\theta_{pred}$
+   can spuriously jump near $\pm180°$. The code wraps this innovation back
+   into $(-\pi,\pi]$ before using it.
 
-Two subtle but important details baked into the code:
+## 2.4 Worked example: two steps, real numbers
 
-1. **Use the exact nonlinear `h()` to compute the innovation**, and only
-   use the *linearized* `H` to propagate covariance and compute the gain.
-   Mixing these up (e.g. using `H*ŝ` instead of `h(ŝ)` for the innovation)
-   is the single most common EKF bug.
-2. **Angle wraparound.** Because `θ` lives on a circle, a naive subtraction
-   like `θ_measured − θ_predicted` can spuriously jump near ±180°
-   (e.g. -179° minus +179° "looks like" -358° instead of the true small
-   gap of +2°). The code wraps this innovation back into `(-π, π]` with
-   `angle_wrap()` before using it — always do this for any angular
-   measurement in an EKF.
+Setup: $u=(a_x{=}1.2, a_y{=}0.6)$, starting belief $\hat s_0=(x{=}5,
+v_x{=}0, y{=}0, v_y{=}0)$, $R=\mathrm{diag}(2^2,(3°)^2)$. Two fixed sensor
+readings: $(r{=}6.0,\ \theta{=}0.05\text{ rad})$, then $(r{=}7.2,\
+\theta{=}0.09\text{ rad})$.
 
----
+| step | predicted $(x,y)$ | $H$ row 1 (range) | $H$ row 2 (bearing) | innovation $(r,\theta)$ | posterior $(x,v_x,y,v_y)$ |
+|---|---|---|---|---|---|
+| 1 | (5.006, 0.003) | (1.000, 0.0006) | (−0.00012, 0.1998) | (0.994, 0.0494) | (5.006, 0.120, 0.0030, 0.0601) |
+| 2 | (5.024, 0.012) | (1.000, 0.0024) | (−0.00048, 0.1990) | (2.176, 0.0876) | (5.024, 0.240, 0.0121, 0.1206) |
 
-## 8. Worked numeric example for the EKF
+*(Full precision, plus the complete $4\times4$ $P$ and $4\times2$ $K$
+matrices, print from `ekf_stepbystep.py`.)*
 
-As with the KF, every number below is the **literal console output** of
-`ekf_stepbystep.py` — run `python3 ekf_stepbystep.py` yourself and you'll
-get this exact printout. Two fixed (non-random) range/bearing readings
-stand in for the Ninja's rangefinder: `(range=6.0, bearing=0.05 rad)` then
-`(range=7.2, bearing=0.09 rad)`.
+**Two things worth actually noticing:**
 
-**Setup:** quail starts at `s_est = [x=5, vx=0, y=0, vy=0]`, with
-`P = Ex * 10` (a bit more uncertain than one process-noise step, since we
-don't trust the initial guess perfectly). Control input `u = [ax=1.2,
-ay=0.6]`. `R = diag([2², (3°)²]) ≈ diag([4, 0.002742])`.
+- **$H$'s range row is close to $(1, 0, \approx0, 0)$.** The Quail is
+  nearly due east of the Ninja right now, so range is *almost exactly*
+  the x-coordinate — the Jacobian correctly recovers the "obvious" linear
+  relationship exactly where the geometry makes it valid. It will look
+  completely different once the Quail is, say, due north.
+- **Range mostly corrects $(x,v_x)$; bearing mostly corrects $(y,v_y)$** —
+  compare the two $H$ rows above: range depends almost entirely on $x$,
+  bearing almost entirely on $y$ (right now). This split isn't hardcoded
+  anywhere — it falls straight out of the Jacobian, every step.
+- **$v_x$ and $v_y$ get updated even though neither is ever measured** —
+  exactly like the plain KF, via the off-diagonal correlations built up
+  during predict.
 
-### Step 1 — measurement (range=6.0, bearing=0.05 rad)
+## 2.5 Watching the EKF converge
 
-```
--- Predict (still linear: motion model has no nonlinearity) --
-s_pred = A @ s_est + B@u =
- [5.006  0.12   0.003  0.06 ]          # order: [x, vx, y, vy]
-P_pred =
- [[5.6875e-06 3.8750e-05 0.0000e+00 0.0000e+00]
-  [3.8750e-05 2.7500e-04 0.0000e+00 0.0000e+00]
-  [0.0000e+00 0.0000e+00 5.6875e-06 3.8750e-05]
-  [0.0000e+00 0.0000e+00 3.8750e-05 2.7500e-04]]
+**`plots/ekf_trajectory.png`** — true 2‑D path (red), raw range/bearing
+readings converted back to $(x,y)$ just for plotting (gray dots), and the
+EKF estimate (green), with the Ninja marked at the origin.
 
--- Linearize (Jacobian recomputed fresh, at s_pred) --
-h(s_pred) = [range_pred, bearing_pred] = [5.006001, 0.000599]
-H = Jacobian of h at s_pred =
- [[ 0.9999998  0.         0.0005993  0.        ]
-  [-0.0001197  0.         0.1997602  0.        ]]
+**`plots/ekf_convergence.png`** — the same "headline" style as
+`kf_convergence.png`: true $x$, raw sensor $x$, EKF estimate, and its
+shrinking $\pm2\sigma$ band, all over time.
 
--- Update --
-innovation (range, bearing) = z - h(s_pred) = [0.993999, 0.049401]
-S = H@P_pred@H.T + R =
- [[4.000006e+00  ~0        ]
-  [ ~0           2.741784e-03]]
-K = P_pred @ H.T @ inv(S) =
- [[ 1.421873e-06 -2.483291e-07]
-  [ 9.687484e-06 -1.691913e-06]
-  [ 8.521011e-10  4.143785e-04]
-  [ 5.805524e-09  2.823238e-03]]
-s_est = s_pred + K@innovation = [5.006001  0.120095  0.003020  0.060139]
-P (posterior) =
- [[5.687492e-06 3.874994e-05 2.772894e-13 1.889224e-12]
-  [3.874994e-05 2.749996e-04 1.889224e-12 1.287164e-11]
-  [2.772894e-13 1.889224e-12 5.687029e-06 3.874679e-05]
-  [1.889224e-12 1.287164e-11 3.874679e-05 2.749781e-04]]
-```
+**`plots/ekf_position_error.png`** — $|\text{error}|$ over time, raw
+sensor vs. EKF, same idea as `kf_error.png`.
 
-A few things worth actually noticing here, not skimming past:
-
-* **`H`'s first row is `[≈1, 0, ≈0.0006, 0]`.** That means, right now,
-  range is *almost exactly* just the x-coordinate — because the quail is
-  nearly due east of the Ninja, so a small change in `x` moves the range
-  almost 1‑for‑1, while a small change in `y` barely moves it at all. This
-  is the Jacobian correctly recovering the "obvious" simple relationship
-  exactly where the geometry makes it valid — it will look very different
-  once the quail is, say, due north instead of due east.
-* **Look at column 2 of `K`** (the column that multiplies the *bearing*
-  innovation): its `y` and `vy` entries (`4.14e-4`, `2.82e-3`) are much
-  bigger than its `x` and `vx` entries (`8.5e-10`, `5.8e-9`). That's
-  because — from `H`'s second row — bearing depends almost entirely on
-  `y` right now (coefficient `0.1998`) and almost not at all on `x`
-  (coefficient `-0.00012`). So a bearing measurement mostly corrects `y`
-  and `vy`, while a range measurement (column 1 of `K`) mostly corrects
-  `x` and `vx`. **This split — different measurements informing different
-  state components, automatically, with no code that says "if bearing,
-  update y" — falls straight out of the Jacobian.** Nobody hard-coded it.
-* **`vx` and `vy` get updated too** (`0 → 0.120`, `0 → 0.060`), even though
-  neither is directly measured — the off-diagonal terms of `P_pred` (built
-  up during the predict step, exactly like in the plain KF) carry the
-  correction from position into velocity.
-
-### Step 2 — measurement (range=7.2, bearing=0.09 rad)
-
-```
--- Predict --
-s_pred = A @ s_est + B@u = [5.024002  0.24001   0.012034  0.120139]
-
--- Linearize --
-h(s_pred) = [5.024017, 0.002395]
-H =
- [[ 0.9999971  0.         0.0023954  0.        ]
-  [-0.0004768  0.         0.1990434  0.        ]]
-
--- Update --
-innovation = [2.175983, 0.087605]
-K =
- [[ 4.062466e-06 -2.825321e-06]
-  [ 1.687486e-05 -1.173595e-05]
-  [ 9.730583e-09  1.179414e-03]
-  [ 4.041940e-08  4.899114e-03]]
-s_est = s_pred + K@innovation = [5.024011  0.240045  0.012138  0.120569]
-```
-
-`H` shifted slightly between the two steps (`0.9999998 → 0.9999971` on the
-range/x term) purely because the quail moved slightly — this is the
-"extended" part of EKF in action: **the linearization point moves every
-step, so `H` is recomputed every step**, unlike the plain KF's constant
-`C`.
-
-**See it end-to-end:** run `ekf_radar_tracking.py` and look at
-`plots/ekf_trajectory.png` — the raw range/bearing readings (converted
-back to x,y just for plotting) are scattered noisily, but the green EKF
-estimate tracks the true red path closely, and
-`plots/ekf_covariance_ellipse.png` shows the final 2‑σ confidence ellipse
-around the last estimate.
+**`plots/ekf_covariance_ellipse.png`** — the final 2‑D uncertainty ellipse
+around the last EKF estimate, in $(x,y)$ space.
 
 ---
 
-## 9. Reading the EKF code, line by line
+# Part 3 — KF vs EKF
 
-> As with the KF, `ekf_stepbystep.py` runs this same filter with no
-> randomness and prints every matrix — its output is exactly Section 8
-> above. Run it side-by-side with reading this section if any step feels
-> abstract.
-
-`ekf_radar_tracking.py` follows the same predict/update skeleton as the
-KF script, with three additions that map directly onto Section 7:
-
-```python
-def h(state):
-    ...
-    return np.array([[r], [theta]])          # the NONLINEAR measurement model
-
-def jacobian_H(state):
-    ...
-    return H                                  # the linearization of h(), Section 7.3
-
-def angle_wrap(a):
-    return (a + np.pi) % (2*np.pi) - np.pi     # keeps bearing innovations sane
-```
-
-Inside the main loop:
-
-```python
-s_est = A @ s_est + B @ u        # predict — identical to plain KF (motion is linear)
-P = A @ P @ A.T + Ex
-
-H = jacobian_H(s_est)             # <-- recomputed FRESH every timestep (the "extended" part)
-z_pred = h(s_est)                  # <-- use the exact nonlinear h(), not H @ s_est
-
-innovation = z_meas[k].reshape(2,1) - z_pred
-innovation[1, 0] = angle_wrap(innovation[1, 0])   # guard against angle wraparound
-
-S = H @ P @ H.T + R
-K = P @ H.T @ np.linalg.inv(S)
-s_est = s_est + K @ innovation
-P = (np.eye(4) - K @ H) @ P
-```
-
-Everything else (plotting, noise simulation) mirrors the KF script.
-
----
-
-## 10. KF vs EKF: when to use which
-
-| | **Kalman Filter (KF)** | **Extended Kalman Filter (EKF)** |
+| | **KF** | **EKF** |
 |---|---|---|
-| Motion model | must be linear: `x' = A*x + B*u` | can be nonlinear: `x' = f(x,u)` (linearized via Jacobian `F`) |
-| Measurement model | must be linear: `y = C*x` | can be nonlinear: `y = h(x)` (linearized via Jacobian `H`) |
-| Optimality | **Provably optimal** (minimum variance, unbiased) given Gaussian noise and linear models | Only **approximately** optimal — accuracy depends on how "linear-ish" `f`/`h` are near the current estimate |
-| Computation | Fixed matrices, computed once | Jacobians recomputed every step (more CPU, more code) |
-| Failure mode | None, if assumptions hold | Can **diverge** if the true state wanders far from where you linearized, or if the nonlinearity is very sharp over the size of your uncertainty |
-| Tuning difficulty | Low | Higher — bad initial estimate + strong nonlinearity is a classic way to get a confidently-wrong filter |
+| Motion model | must be linear | can be nonlinear (linearized via Jacobian $F$) |
+| Measurement model | must be linear | can be nonlinear (linearized via Jacobian $H$) |
+| Optimality | **provably optimal** given Gaussian noise + linear models | only **approximately** optimal — depends how "linear-ish" the model is near the estimate |
+| Cost | fixed matrices | Jacobians recomputed every step |
+| Failure mode | none, if assumptions hold | can diverge if the true state strays far from where you linearized |
 
 **Rule of thumb:**
-- If your sensor reads out something that's already linear in the state you
-  care about (a GPS reading position, an odometer reading distance) → **KF**.
-- If your sensor or dynamics involve angles, ranges, products of state
-  variables, trig functions, or anything where "doubling the state doesn't
-  double the output" → you need at least an **EKF**.
-- If the nonlinearity is *severe*, or your initial uncertainty is huge
-  relative to how curved `f`/`h` are, the EKF's linear approximation can be
-  poor enough to diverge. In that regime, people reach for the **Unscented
-  Kalman Filter (UKF)** (propagates a small set of sample "sigma points"
-  through the *exact* nonlinear function instead of linearizing it — more
-  accurate, no Jacobians needed, similar cost) or a **particle filter**
-  (fully general, handles non-Gaussian noise too, but much more
-  computationally expensive). This tutorial doesn't implement those, but
-  it's the natural next step once EKF isn't good enough.
+- Sensor already linear in the state (GPS → position, odometer → distance)
+  → **KF**.
+- Sensor/dynamics involve angles, ranges, products of state variables, or
+  trig → you need at least **EKF**.
+- Severe nonlinearity, or huge initial uncertainty relative to how curved
+  $f$/$h$ are → the EKF's linear approximation can be too rough. Reach for
+  the **Unscented Kalman Filter** (propagates sample "sigma points" through
+  the exact nonlinear function — no Jacobians, more accurate, similar
+  cost) or a **particle filter** (fully general, handles non-Gaussian
+  noise, but expensive). Not implemented here, but the natural next step.
 
-In short: **KF is a special case of EKF** where `f` and `h` happen to
-already be linear (so the Jacobians `F` and `H` are just the constant
-matrices `A` and `C`, and the linearization is exact rather than
-approximate). Every trick you learned in Sections 3–5 is still exactly
-what's running inside the EKF in Sections 7–9 — the only new idea in the
-entire EKF is "recompute the Jacobian at the current estimate before doing
-the same KF math."
+**In short: the KF is a special case of the EKF** where $f$ and $h$
+already happen to be linear, so their Jacobians are just the constant
+matrices $A$ and $C$, and the linearization is exact rather than
+approximate.
 
----
+## Common pitfalls
 
-## 11. Common pitfalls & things people get wrong
-
-- **Using `H @ x` instead of `h(x)` for the innovation.** The Jacobian is
-  only a *local* linear approximation. The actual innovation must compare
-  the real measurement to the real nonlinear prediction `h(x̂⁻)`, not to
-  `H*x̂⁻`. Using `H*x̂⁻` throws away exactly the nonlinear information you
-  built the EKF to capture.
-- **Forgetting to re-evaluate the Jacobian every step.** `H` (or `F`) is a
-  function of the current state estimate — it changes constantly. Caching
-  a stale Jacobian silently turns your EKF back into a (bad) linear KF.
-- **Angle/units mismatches in the innovation.** Any circular quantity
-  (bearing, heading, longitude near ±180°) needs explicit wraparound
-  handling, or the filter will occasionally see huge fake innovations and
-  overreact.
-- **Confusing process noise `Ex`/`Q` with measurement noise `Ez`/`R`.**
-  `Q` describes how wrong your *model of the world* is; `R` describes how
-  wrong your *sensor* is. Swapping them (or setting either to 0 "to make
-  it simpler") makes the filter overconfident in exactly the wrong way.
-- **Initializing `P` at zero.** If you tell the filter "I am 100% certain
-  of my initial state," the Kalman gain will be ~0 forever and it will
-  ignore all future measurements. Always start with a `P` that honestly
-  reflects your initial uncertainty.
-- **Expecting the EKF to be optimal.** It isn't, by construction — it's a
-  good, cheap approximation. If it's diverging, the fix is rarely "more
-  decimal places"; it's usually a better initial estimate, a shorter
-  timestep (so linearization is valid over a smaller step), or switching
-  to a UKF/particle filter.
+- Using $H\hat x$ instead of the real $h(\hat x)$ for the innovation.
+- Forgetting to recompute the Jacobian every step (silently turns the EKF
+  back into a bad linear KF).
+- Not wrapping angular innovations into $(-\pi,\pi]$.
+- Confusing process noise ($E_x$/$Q$ — how wrong your *model* is) with
+  measurement noise ($E_z$/$R$ — how wrong your *sensor* is).
+- Initializing $P$ at zero ("I'm 100% sure of my start") — this makes the
+  gain ~0 forever, so the filter ignores all future measurements.
+- Expecting the EKF to be optimal — it's a cheap, good approximation, not
+  a guarantee. If it diverges, try a better initial estimate, a shorter
+  timestep, or a UKF/particle filter.

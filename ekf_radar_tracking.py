@@ -224,3 +224,21 @@ plt.close()
 print("Done. Plots written to:", OUTDIR)
 print(f"Final EKF position error: {ekf_err[-1]:.3f} m "
       f"(raw sensor reading error would have been {raw_err[-1]:.3f} m)")
+
+# (d) THE HEADLINE PLOT: watch the x-position estimate converge onto the
+# truth, with an honest shrinking uncertainty band (±2 standard deviations).
+sigma_x = np.sqrt(P_hist[:, 0, 0])
+plt.figure(figsize=(9, 5))
+plt.fill_between(t_grid, est_xy[:, 0] - 2*sigma_x, est_xy[:, 0] + 2*sigma_x,
+                  color='green', alpha=0.15, label='EKF ±2σ confidence band (x)')
+plt.plot(t_grid, raw_xy[:, 0], '.', color='gray', markersize=4, alpha=0.5, label='Raw sensor reading (x)')
+plt.plot(t_grid, true_xy[:, 0], 'r-', linewidth=2.5, label='True x position')
+plt.plot(t_grid, est_xy[:, 0], 'g-', linewidth=2, label='EKF estimate (x)')
+plt.xlabel('time (s)')
+plt.ylabel('x position (m)')
+plt.title('The EKF estimate locks onto the truth while its own\nuncertainty band (shaded) honestly shrinks')
+plt.legend(loc='upper left')
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.savefig(os.path.join(OUTDIR, 'ekf_convergence.png'), dpi=150)
+plt.close()
