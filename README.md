@@ -47,7 +47,7 @@ current velocity and the acceleration. So two numbers are necessary —
 and sufficient:
 
 $$
-x_k = \begin{bmatrix} p_k \\ v_k \end{bmatrix}
+x_k = \begin{bmatrix} p_k \cr  v_k \end{bmatrix}
 \qquad \text{(position, velocity)}
 $$
 
@@ -115,12 +115,12 @@ Stack $p_{k+1}, v_{k+1}$ into a vector and split each equation into
 $u$":
 
 $$
-\begin{bmatrix} p_{k+1} \\ v_{k+1} \end{bmatrix}
+\begin{bmatrix} p_{k+1} \cr  v_{k+1} \end{bmatrix}
 =
-\underbrace{\begin{bmatrix} 1 & dt \\ 0 & 1 \end{bmatrix}}_{A}
-\begin{bmatrix} p_k \\ v_k \end{bmatrix}
+\underbrace{\begin{bmatrix} 1 & dt \cr  0 & 1 \end{bmatrix}}_{A}
+\begin{bmatrix} p_k \cr  v_k \end{bmatrix}
 +
-\underbrace{\begin{bmatrix} dt^2/2 \\ dt \end{bmatrix}}_{B} u
+\underbrace{\begin{bmatrix} dt^2/2 \cr  dt \end{bmatrix}}_{B} u
 + \text{noise}
 $$
 
@@ -133,8 +133,8 @@ for the $u$-terms. So:
 
 $$
 x_{k+1} = A x_k + B u, \qquad
-A = \begin{bmatrix} 1 & dt \\ 0 & 1 \end{bmatrix}, \quad
-B = \begin{bmatrix} dt^2/2 \\ dt \end{bmatrix}
+A = \begin{bmatrix} 1 & dt \cr  0 & 1 \end{bmatrix}, \quad
+B = \begin{bmatrix} dt^2/2 \cr  dt \end{bmatrix}
 $$
 
 ### Step 4 — the measurement model
@@ -146,15 +146,15 @@ $$
 y_k = C x_k + \text{noise}, \qquad C = \begin{bmatrix} 1 & 0 \end{bmatrix}
 $$
 
-$C$ is a **selection matrix**: $C x_k = [1\ \ 0]\begin{bmatrix}p_k\\v_k\end{bmatrix} = p_k$. If the sensor instead measured velocity too, $C$ would be the $2\times2$ identity; if it measured a *scaled* position (say, pixels instead of meters), $C$ would hold that scale factor instead of a bare $1$. The general rule: $C$ encodes whatever known, linear arithmetic converts state into sensor reading.
+$C$ is a **selection matrix**: $C x_k = [1\ \ 0]\begin{bmatrix}p_k\cr v_k\end{bmatrix} = p_k$. If the sensor instead measured velocity too, $C$ would be the $2\times2$ identity; if it measured a *scaled* position (say, pixels instead of meters), $C$ would hold that scale factor instead of a bare $1$. The general rule: $C$ encodes whatever known, linear arithmetic converts state into sensor reading.
 
 ### Step 5 — turn the leftover noise term into a covariance matrix, $E_x$
 
 The noise term we dropped above, on both equations at once, is:
 
 $$
-\begin{bmatrix} \tfrac12 w_k\,dt^2 \\ w_k\,dt \end{bmatrix}
-= \underbrace{\begin{bmatrix} dt^2/2 \\ dt \end{bmatrix}}_{=B,\ \text{call it } g}\, w_k
+\begin{bmatrix} \tfrac12 w_k\,dt^2 \cr  w_k\,dt \end{bmatrix}
+= \underbrace{\begin{bmatrix} dt^2/2 \cr  dt \end{bmatrix}}_{=B,\ \text{call it } g}\, w_k
 $$
 
 Notice this is exactly $B$ again — makes sense, since the *noise* is
@@ -171,17 +171,17 @@ Multiply it out:
 
 $$
 g g^\top =
-\begin{bmatrix} dt^2/2 \\ dt \end{bmatrix}
+\begin{bmatrix} dt^2/2 \cr  dt \end{bmatrix}
 \begin{bmatrix} dt^2/2 & dt \end{bmatrix}
 =
-\begin{bmatrix} dt^4/4 & dt^3/2 \\ dt^3/2 & dt^2 \end{bmatrix}
+\begin{bmatrix} dt^4/4 & dt^3/2 \cr  dt^3/2 & dt^2 \end{bmatrix}
 $$
 
 so
 
 $$
 E_x = \sigma_a^2
-\begin{bmatrix} dt^4/4 & dt^3/2 \\ dt^3/2 & dt^2 \end{bmatrix}
+\begin{bmatrix} dt^4/4 & dt^3/2 \cr  dt^3/2 & dt^2 \end{bmatrix}
 $$
 
 This is why the off-diagonal terms exist: they're not a separate
@@ -332,8 +332,8 @@ and $y_k = Cx_k$. Now the Ninja trades his direct-vision eyes for a
 rangefinder + compass:
 
 $$
-h(x,y) = \begin{bmatrix} r \\ \theta \end{bmatrix}
-= \begin{bmatrix} \sqrt{x^2+y^2} \\ \operatorname{atan2}(y,x) \end{bmatrix}
+h(x,y) = \begin{bmatrix} r \cr  \theta \end{bmatrix}
+= \begin{bmatrix} \sqrt{x^2+y^2} \cr  \text{atan2}(y,x) \end{bmatrix}
 $$
 
 There is no matrix $C$ with $h(\text{state}) = C \cdot \text{state}$ — this
@@ -361,7 +361,7 @@ Quail now moves in a plane, so predicting its future position needs
 both position *and* velocity **on each axis**:
 
 $$
-s = \begin{bmatrix} x \\ v_x \\ y \\ v_y \end{bmatrix}
+s = \begin{bmatrix} x \cr  v_x \cr  y \cr  v_y \end{bmatrix}
 $$
 
 Nothing new here: $x,v_x$ obey exactly the same constant-acceleration
@@ -402,7 +402,7 @@ $$
 \frac{\partial r}{\partial v_x} = \frac{\partial r}{\partial v_y} = 0
 $$
 
-**Row 2 — bearing, $\theta=\operatorname{atan2}(y,x)$.** For $x>0$ this
+**Row 2 — bearing, $\theta=\text{atan2}(y,x)$.** For $x>0$ this
 is the same function as $\theta=\arctan(y/x)$ (atan2 just extends it to
 handle all four quadrants and $x=0$; the derivative formula below is the
 one that's valid everywhere, quadrant issues included). Using
@@ -438,7 +438,7 @@ $$
 order $x,v_x,y,v_y$) to get $H$:
 
 $$
-H = \begin{bmatrix} x/r & 0 & y/r & 0 \\ -y/r^2 & 0 & x/r^2 & 0 \end{bmatrix}
+H = \begin{bmatrix} x/r & 0 & y/r & 0 \cr  -y/r^2 & 0 & x/r^2 & 0 \end{bmatrix}
 $$
 
 Because $x,y$ (and therefore $r$) change every step, $H$ must be
